@@ -1,14 +1,14 @@
-// server.js - Railway-safe OpenAI to NVIDIA NIM Proxy
+// server.js - Railway-safe OpenAI→NIM Proxy, reasoning stripped
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 
 const app = express();
 
-// 🚨 Railway assigns a dynamic PORT
+// Railway PORT
 const PORT = process.env.PORT;
 if (!PORT) {
-  console.error('PORT not set. Railway requires process.env.PORT.');
+  console.error('PORT not set!');
   process.exit(1);
 }
 
@@ -16,17 +16,13 @@ if (!PORT) {
 app.use(cors());
 app.use(express.json());
 
-// NVIDIA NIM API config
+// NIM config
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 if (!NIM_API_KEY) {
   console.error('NIM_API_KEY not set!');
   process.exit(1);
 }
-
-// Reasoning / Thinking toggles
-const SHOW_REASONING = false;
-const ENABLE_THINKING_MODE = false;
 
 // Model mapping
 const MODEL_MAPPING = {
@@ -39,30 +35,19 @@ const MODEL_MAPPING = {
   'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking'
 };
 
-// 🚨 Global error handling
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection:', reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-});
+// Global error handling
+process.on('unhandledRejection', (reason) => console.error('Unhandled Rejection:', reason));
+process.on('uncaughtException', (err) => console.error('Uncaught Exception:', err));
 
-// 🚀 Railway-friendly "Hello World" root
-app.get('/', (req, res) => {
-  res.send('Hello Railway! Proxy is alive.');
-});
+// Minimal root endpoint
+app.get('/', (req, res) => res.send('Hello Railway! Proxy is alive.'));
 
-// Health check endpoint
+// Health check
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'OpenAI to NVIDIA NIM Proxy',
-    reasoning_display: SHOW_REASONING,
-    thinking_mode: ENABLE_THINKING_MODE
-  });
+  res.json({ status: 'ok', service: 'OpenAI to NVIDIA NIM Proxy' });
 });
 
-// List models endpoint
+// List models
 app.get('/v1/models', (req, res) => {
   const models = Object.keys(MODEL_MAPPING).map(model => ({
     id: model,
@@ -73,13 +58,12 @@ app.get('/v1/models', (req, res) => {
   res.json({ object: 'list', data: models });
 });
 
-// Chat completions endpoint (safe wrapper)
+// Chat completions - reasoning stripped
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
     const finalMessages = Array.isArray(messages) ? messages : [];
 
-    // Determine NIM model
     let nimModel = MODEL_MAPPING[model] || 'meta/llama-3.1-8b-instruct';
 
     const nimRequest = {
@@ -87,7 +71,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       messages: finalMessages,
       temperature: temperature ?? 0.6,
       max_tokens: Math.min(max_tokens ?? 1024, 1024),
-      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
       stream: stream || false
     };
 
@@ -97,6 +80,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
 
     if (stream) {
+      // streaming - pass through as-is
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -107,22 +91,42 @@ app.post('/v1/chat/completions', async (req, res) => {
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
         lines.forEach(line => {
-          if (line.startsWith('data: ')) res.write(line + '\n\n');
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.choices) {
+                // Strip reasoning content
+                data.choices.forEach(c => {
+                  if (c.delta?.reasoning_content) delete c.delta.reasoning_content;
+                });
+              }
+              res.write(`data: ${JSON.stringify(data)}\n\n`);
+            } catch (e) {
+              res.write(line + '\n');
+            }
+          }
         });
       });
 
       response.data.on('end', () => res.end());
-      response.data.on('error', (err) => {
-        console.error('Stream error:', err);
-        res.end();
-      });
+      response.data.on('error', (err) => { console.error('Stream error:', err); res.end(); });
     } else {
+      // Non-streaming - remove reasoning
+      const choices = (response.data.choices || []).map(choice => {
+        let content = choice.message?.content ?? '';
+        return {
+          index: choice.index,
+          message: { role: choice.message?.role ?? 'assistant', content },
+          finish_reason: choice.finish_reason
+        };
+      });
+
       res.json({
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
-        model: model,
-        choices: response.data.choices || [],
+        model,
+        choices,
         usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       });
     }
@@ -135,13 +139,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 });
 
 // Catch-all
-app.all('*', (req, res) => {
-  res.status(404).json({ error: { message: `Endpoint ${req.path} not found`, type: 'invalid_request_error', code: 404 } });
-});
+app.all('*', (req, res) => res.status(404).json({ error: { message: `Endpoint ${req.path} not found`, type: 'invalid_request_error', code: 404 } }));
 
-// Start server (Railway-safe)
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Railway-safe OpenAI→NIM Proxy running on port ${PORT}`);
-});
+// Start server
+app.listen(PORT, '0.0.0.0', () => console.log(`Railway-safe proxy running on port ${PORT}, reasoning stripped`));
+
 
 
