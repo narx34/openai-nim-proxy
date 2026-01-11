@@ -1,14 +1,14 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy (Railway Safe, 0.0.0.0 Binding)
+// server.js - Railway-safe OpenAI to NVIDIA NIM Proxy
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 
 const app = express();
 
-// 🚨 Railway requires process.env.PORT
+// 🚨 Railway assigns a dynamic PORT
 const PORT = process.env.PORT;
 if (!PORT) {
-  console.error('No PORT env variable set. Railway requires process.env.PORT.');
+  console.error('PORT not set. Railway requires process.env.PORT.');
   process.exit(1);
 }
 
@@ -16,19 +16,19 @@ if (!PORT) {
 app.use(cors());
 app.use(express.json());
 
-// NVIDIA NIM API configuration
+// NVIDIA NIM API config
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 if (!NIM_API_KEY) {
-  console.error('NIM_API_KEY is missing. Please set it in Railway environment variables.');
+  console.error('NIM_API_KEY not set!');
   process.exit(1);
 }
 
-// 🔥 Reasoning / Thinking Toggles
+// Reasoning / Thinking toggles
 const SHOW_REASONING = false;
 const ENABLE_THINKING_MODE = false;
 
-// Model mapping (adjust if needed)
+// Model mapping
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
   'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
@@ -39,13 +39,17 @@ const MODEL_MAPPING = {
   'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking'
 };
 
-// 🚨 Global error handling to prevent Railway SIGTERM
+// 🚨 Global error handling
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  console.error('Unhandled Rejection:', reason);
 });
-
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
+});
+
+// 🚀 Railway-friendly "Hello World" root
+app.get('/', (req, res) => {
+  res.send('Hello Railway! Proxy is alive.');
 });
 
 // Health check endpoint
@@ -66,66 +70,29 @@ app.get('/v1/models', (req, res) => {
     created: Date.now(),
     owned_by: 'nvidia-nim-proxy'
   }));
-  
-  res.json({
-    object: 'list',
-    data: models
-  });
+  res.json({ object: 'list', data: models });
 });
 
-// Chat completions endpoint
+// Chat completions endpoint (safe wrapper)
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
+    const finalMessages = Array.isArray(messages) ? messages : [];
 
-    // ✅ Safe messages handling
-    const finalMessages = Array.isArray(messages) ? [...messages] : [];
+    // Determine NIM model
+    let nimModel = MODEL_MAPPING[model] || 'meta/llama-3.1-8b-instruct';
 
-    // Smart model selection with fallback
-    let nimModel = MODEL_MAPPING[model];
-    if (!nimModel) {
-      try {
-        await axios.post(`${NIM_API_BASE}/chat/completions`, {
-          model: model,
-          messages: [{ role: 'user', content: 'test' }],
-          max_tokens: 1
-        }, {
-          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
-          validateStatus: (status) => status < 500
-        }).then(resp => {
-          if (resp.status >= 200 && resp.status < 300) nimModel = model;
-        });
-      } catch (e) {
-        console.warn('Startup model validation failed, continuing...');
-      }
-      if (!nimModel) {
-        const modelLower = (model || '').toLowerCase();
-        if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
-          nimModel = 'meta/llama-3.1-405b-instruct';
-        } else if (modelLower.includes('claude') || modelLower.includes('gemini') || modelLower.includes('70b')) {
-          nimModel = 'meta/llama-3.1-70b-instruct';
-        } else {
-          nimModel = 'meta/llama-3.1-8b-instruct';
-        }
-      }
-    }
-
-    // Build NIM request
     const nimRequest = {
       model: nimModel,
       messages: finalMessages,
       temperature: temperature ?? 0.6,
-      max_tokens: Math.min(max_tokens ?? 1024, 1024), // throttled
+      max_tokens: Math.min(max_tokens ?? 1024, 1024),
       extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
       stream: stream || false
     };
 
-    // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-      headers: {
-        'Authorization': `Bearer ${NIM_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
       responseType: stream ? 'stream' : 'json'
     });
 
@@ -135,54 +102,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.setHeader('Connection', 'keep-alive');
 
       let buffer = '';
-      let reasoningStarted = false;
-
       response.data.on('data', (chunk) => {
         buffer += chunk.toString();
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
-
         lines.forEach(line => {
-          if (line.startsWith('data: ')) {
-            if (line.includes('[DONE]')) {
-              res.write(line + '\n');
-              return;
-            }
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.choices?.[0]?.delta) {
-                const reasoning = data.choices[0].delta.reasoning_content;
-                const content = data.choices[0].delta.content;
-
-                if (SHOW_REASONING) {
-                  let combinedContent = '';
-                  if (reasoning && !reasoningStarted) {
-                    combinedContent = '<think>\n' + reasoning;
-                    reasoningStarted = true;
-                  } else if (reasoning) {
-                    combinedContent = reasoning;
-                  }
-                  if (content && reasoningStarted) {
-                    combinedContent += '</think>\n\n' + content;
-                    reasoningStarted = false;
-                  } else if (content) {
-                    combinedContent += content;
-                  }
-                  if (combinedContent) {
-                    data.choices[0].delta.content = combinedContent;
-                    delete data.choices[0].delta.reasoning_content;
-                  }
-                } else {
-                  if (content) data.choices[0].delta.content = content;
-                  else data.choices[0].delta.content = '';
-                  delete data.choices[0].delta.reasoning_content;
-                }
-              }
-              res.write(`data: ${JSON.stringify(data)}\n\n`);
-            } catch (e) {
-              res.write(line + '\n');
-            }
-          }
+          if (line.startsWith('data: ')) res.write(line + '\n\n');
         });
       });
 
@@ -191,61 +116,32 @@ app.post('/v1/chat/completions', async (req, res) => {
         console.error('Stream error:', err);
         res.end();
       });
-
     } else {
-      // Standard response
-      const openaiResponse = {
+      res.json({
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: model,
-        choices: response.data.choices.map(choice => {
-          let fullContent = choice.message?.content || '';
-          if (SHOW_REASONING && choice.message?.reasoning_content) {
-            fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
-          }
-          return {
-            index: choice.index,
-            message: {
-              role: choice.message.role,
-              content: fullContent
-            },
-            finish_reason: choice.finish_reason
-          };
-        }),
+        choices: response.data.choices || [],
         usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      };
-      res.json(openaiResponse);
+      });
     }
-
   } catch (error) {
     console.error('Proxy error:', error.message);
     res.status(error.response?.status || 500).json({
-      error: {
-        message: error.message || 'Internal server error',
-        type: 'invalid_request_error',
-        code: error.response?.status || 500
-      }
+      error: { message: error.message || 'Internal server error', type: 'invalid_request_error', code: error.response?.status || 500 }
     });
   }
 });
 
 // Catch-all
 app.all('*', (req, res) => {
-  res.status(404).json({
-    error: {
-      message: `Endpoint ${req.path} not found`,
-      type: 'invalid_request_error',
-      code: 404
-    }
-  });
+  res.status(404).json({ error: { message: `Endpoint ${req.path} not found`, type: 'invalid_request_error', code: 404 } });
 });
 
-// 🚀 Start server on all interfaces (0.0.0.0) for Railway
+// Start server (Railway-safe)
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
-  console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Railway-safe OpenAI→NIM Proxy running on port ${PORT}`);
 });
+
 
