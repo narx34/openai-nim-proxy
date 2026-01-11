@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy (Railway Safe)
+// server.js - OpenAI to NVIDIA NIM API Proxy (Railway Safe, 0.0.0.0 Binding)
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -115,7 +115,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       model: nimModel,
       messages: finalMessages,
       temperature: temperature ?? 0.6,
-      max_tokens: Math.min(max_tokens ?? 1024, 1024), // throttled to prevent long waits
+      max_tokens: Math.min(max_tokens ?? 1024, 1024), // throttled
       extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
       stream: stream || false
     };
@@ -129,7 +129,6 @@ app.post('/v1/chat/completions', async (req, res) => {
       responseType: stream ? 'stream' : 'json'
     });
 
-    // Stream or standard response handling
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
@@ -242,12 +241,11 @@ app.all('*', (req, res) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
+// 🚀 Start server on all interfaces (0.0.0.0) for Railway
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
   console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
 });
-
 
