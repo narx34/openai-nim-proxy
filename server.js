@@ -80,7 +80,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     // 🧠 Reduce reasoning at the source
-    const finalMessages = [...messages];
+    const finalMessages = Array.isArray(messages) ? [...messages] : [];
     finalMessages.unshift({
       role: 'system',
       content: 'Respond clearly and concisely. Do not explain your reasoning. Do not include analysis or thinking.'
